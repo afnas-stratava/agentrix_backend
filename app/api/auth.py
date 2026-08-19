@@ -34,4 +34,5 @@ def google_login(request: GoogleLoginRequest, db: Session = Depends(get_db)):
         "email": user.email,
         "name": user.name,
         "picture": user.profile_image,
+        "onboarding_complete": user.onboarding_complete,
     }
