@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     database_url: str
     google_server_client_id: str
 
+    hume_api_key: str
+    hume_secret_key: str
+    hume_config_id: str
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
