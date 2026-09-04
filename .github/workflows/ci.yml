@@ -39,6 +39,13 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Delete existing image in ECR (if exists)
+        run: |
+          aws ecr batch-delete-image --repository-name ${{ env.ECR_REPOSITORY }} --image-ids imageTag=dev-latest --region ${{ env.AWS_REGION }} || true
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          aws ecr batch-delete-image --repository-name ${{ env.ECR_REPOSITORY }} --image-ids imageTag=dev-$SHORT_SHA --region ${{ env.AWS_REGION }} || true
+          echo "Existing tags cleared (if any)"
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -61,10 +68,10 @@ jobs:
           platforms: linux/amd64
 
   deploy:
-    name: Deploy to EC2 (manual)
+    name: Deploy to EC2
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    needs: []
+    needs: [build]
+    if: github.event_name != 'pull_request'
     environment: dev
     permissions:
       contents: read
