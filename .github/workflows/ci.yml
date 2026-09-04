@@ -1,0 +1,150 @@
+name: CI/CD
+
+"on":
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "ECR image tag to deploy (default: dev-latest)"
+        required: false
+        default: "dev-latest"
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: agentrix/backend
+
+jobs:
+  build:
+    name: Build and push to ECR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=raw,value=dev-latest
+            type=sha,format=short,prefix=dev-
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  deploy:
+    name: Deploy to EC2 (manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    needs: []
+    environment: dev
+    permissions:
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy via SSM (no SSH key needed)
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+        run: |
+          set -e
+          IMAGE="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          echo "Deploying $IMAGE to dev EC2 (us-west-2)..."
+
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --region $AWS_REGION \
+            --filters "Name=tag:Project,Values=agentrix" "Name=tag:Environment,Values=dev" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "::error::No running agentrix/dev instance found in $AWS_REGION"
+            exit 1
+          fi
+
+          echo "Target: $INSTANCE_ID"
+
+          # Optional: pass backend env via SSM Parameter Store or GitHub Secrets.
+          # Here we pass secrets as env vars to the container; prefer SSM Parameter Store for prod.
+          COMMANDS=$(cat <<'EOS'
+            set -e
+            IMAGE="__IMAGE__"
+            echo "Logging in to ECR..."
+            aws ecr get-login-password --region __REGION__ | docker login --username AWS --password-stdin __REGISTRY__
+            echo "Pulling $IMAGE..."
+            docker pull "$IMAGE"
+            echo "Restarting container..."
+            docker network create agentrix-be 2>/dev/null || true
+            docker stop agentrix-backend || true
+            docker rm agentrix-backend || true
+            docker run -d --name agentrix-backend --network agentrix-be --restart unless-stopped -p 80:8000 \
+              -e DATABASE_URL="__DATABASE_URL__" \
+              -e GOOGLE_SERVER_CLIENT_ID="__GOOGLE_CLIENT_ID__" \
+              -e HUME_API_KEY="__HUME_API_KEY__" \
+              -e HUME_SECRET_KEY="__HUME_SECRET_KEY__" \
+              -e HUME_CONFIG_ID="__HUME_CONFIG_ID__" \
+              "$IMAGE"
+            docker ps | grep agentrix-backend
+            curl -sf http://localhost:80/health || curl -sf http://localhost:8000/health || echo "health check pending"
+          EOS
+          )
+          # Replace placeholders (avoid leaking secrets in logs)
+          COMMANDS=$(echo "$COMMANDS" | sed \
+            -e "s|__IMAGE__|$IMAGE|g" \
+            -e "s|__REGION__|$AWS_REGION|g" \
+            -e "s|__REGISTRY__|$ECR_REGISTRY|g" \
+            -e "s|__DATABASE_URL__|${{ secrets.DATABASE_URL }}|g" \
+            -e "s|__GOOGLE_CLIENT_ID__|${{ secrets.GOOGLE_SERVER_CLIENT_ID }}|g" \
+            -e "s|__HUME_API_KEY__|${{ secrets.HUME_API_KEY }}|g" \
+            -e "s|__HUME_SECRET_KEY__|${{ secrets.HUME_SECRET_KEY }}|g" \
+            -e "s|__HUME_CONFIG_ID__|${{ secrets.HUME_CONFIG_ID }}|g")
+
+          CMD_ID=$(aws ssm send-command \
+            --region $AWS_REGION \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"$COMMANDS\"]" \
+            --query "Command.CommandId" --output text)
+
+          echo "SSM command: $CMD_ID — waiting..."
+          aws ssm wait command-executed --region $AWS_REGION --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" || true
+          aws ssm get-command-invocation --region $AWS_REGION --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query "StandardOutputContent" --output text
+          STATUS=$(aws ssm get-command-invocation --region $AWS_REGION --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" --query "Status" --output text)
+          echo "SSM status: $STATUS"
+          [ "$STATUS" = "Success" ] || exit 1
