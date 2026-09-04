@@ -92,6 +92,7 @@ jobs:
           ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
         run: |
           set -e
+          if [ -z "$IMAGE_TAG" ]; then IMAGE_TAG="dev-latest"; fi
           IMAGE="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
           echo "Deploying $IMAGE to dev EC2 (us-west-2)..."
 
@@ -142,11 +143,13 @@ jobs:
             -e "s|__HUME_SECRET_KEY__|${{ secrets.HUME_SECRET_KEY }}|g" \
             -e "s|__HUME_CONFIG_ID__|${{ secrets.HUME_CONFIG_ID }}|g")
 
+          # JSON-escape COMMANDS (handles quotes/newlines for SSM)
+          COMMANDS_JSON=$(printf '%s' "$COMMANDS" | jq -Rs .)
           CMD_ID=$(aws ssm send-command \
             --region $AWS_REGION \
             --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters "commands=[\"$COMMANDS\"]" \
+            --parameters "{\"commands\": [$COMMANDS_JSON]}" \
             --query "Command.CommandId" --output text)
 
           echo "SSM command: $CMD_ID — waiting..."
