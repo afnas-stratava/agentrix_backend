@@ -96,7 +96,7 @@ jobs:
             docker rmi "$IMAGE" || true
             echo "Pulling $IMAGE..."
             docker pull "$IMAGE"
-            docker run -d --name agentrix-backend --network agentrix-be --restart unless-stopped -p 80:8000 \
+            docker run -d --name agentrix-backend --network agentrix-be --restart unless-stopped -p 127.0.0.1:8000:8000 \
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               -e GOOGLE_SERVER_CLIENT_ID="${{ secrets.GOOGLE_SERVER_CLIENT_ID }}" \
               -e HUME_API_KEY="${{ secrets.HUME_API_KEY }}" \
