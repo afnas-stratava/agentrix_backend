@@ -89,10 +89,13 @@ jobs:
             IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
             echo "Deploying $IMAGE..."
             aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
-            docker pull "$IMAGE"
             docker network create agentrix-be 2>/dev/null || true
+            echo "Removing old container/image if exists..."
             docker stop agentrix-backend || true
             docker rm agentrix-backend || true
+            docker rmi "$IMAGE" || true
+            echo "Pulling $IMAGE..."
+            docker pull "$IMAGE"
             docker run -d --name agentrix-backend --network agentrix-be --restart unless-stopped -p 80:8000 \
               -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
               -e GOOGLE_SERVER_CLIENT_ID="${{ secrets.GOOGLE_SERVER_CLIENT_ID }}" \
